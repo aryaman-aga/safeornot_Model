@@ -1,101 +1,105 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import logging
-import transformers
 import re
-
+import numpy as np
+import onnxruntime as ort
+from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
+import os
 
 # ==========================================
-# 1. SERVER CONFIG & GLOBAL VARIABLES
+# CONFIG
 # ==========================================
 app = FastAPI(title="Safety Check API", version="1.0")
 
-# Silence Warnings
-transformers.logging.set_verbosity_error()
-
-# Global variables to hold model in memory
-MODEL_ID = "aryaman1222/safeornot-safety-model"
-
-model = None
-tokenizer = None
-device = None
+MODEL_REPO = "aryaman1222/safeornot-safety-model-onnx"
 MAX_LEN = 128
 
-# Define the "Bouncer" List (Rule-Based Filter)
+tokenizer = None
+ort_session = None
+
+# Profanity list
 HARD_CUSS_WORDS = [
-    
-        "bsdk", "bhosdike", "bhosadike", "bhosdi", 
-        "mc", "madarchod", "maderchod", 
-        "bc", "bhenchod", "behenchod", "benchod",
-        "chutiya", "choot", "chu", "gandu", "gaandu", 
-        "lodu", "laude", "lawde", "loda",
-        "randi", "chinnal", "kameena", "harami", "haramkhor",
-        "tatte", "jhant", "gaand", "gand" , "lund", "chudai","chodu" ,"randikhana", "rand" , "madar"   
+    "bsdk", "bhosdike", "bhosadike", "bhosdi",
+    "mc", "madarchod", "maderchod",
+    "bc", "bhenchod", "behenchod", "benchod",
+    "chutiya", "choot", "chu", "gandu", "gaandu",
+    "lodu", "laude", "lawde", "loda",
+    "randi", "chinnal", "kameena", "harami", "haramkhor",
+    "tatte", "jhant", "gaand", "gand", "lund",
+    "chudai", "chodu", "randikhana", "rand", "madar"
 ]
 
 # ==========================================
-# 2. STARTUP EVENT (Loads Model Once)
+# STARTUP
 # ==========================================
 @app.on_event("startup")
 async def load_model():
-    global model, tokenizer, device
-    print("🚀 Server starting... Loading Model...")
-    
-    # 1. Detect Device
-    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = torch.device("mps")
-        print("✅ Apple Silicon GPU (MPS)")
-    else:
-        device = torch.device("cpu")
-        print("⚠️ Using CPU")
+    global tokenizer, ort_session
 
-    # 2. Load Model & Tokenizer
-    # model_path = "./safety_model_v1" # Ensure this folder exists!
+    print("🚀 Loading ONNX model from Hugging Face...")
+
     try:
-        # model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        # tokenizer = AutoTokenizer.from_pretrained(model_path, clean_up_tokenization_spaces=True)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.float32  # safe default for CPU/MPS
-        )
+        # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_ID,
-            clean_up_tokenization_spaces=True
+            MODEL_REPO,
+            use_fast=True
         )
 
-        model.to(device)
-        model.eval()
-        print("✅ Model Loaded Successfully!")
+        # Download ONNX model
+        onnx_path = hf_hub_download(
+            repo_id=MODEL_REPO,
+            filename="model.onnx",
+            token=os.getenv("HF_TOKEN")
+        )
+
+        # Create ONNX Runtime session
+        ort_session = ort.InferenceSession(
+            onnx_path,
+            providers=["CPUExecutionProvider"]
+        )
+
+        # Warm-up (important)
+        dummy = tokenizer(
+            "warmup",
+            max_length=MAX_LEN,
+            padding="max_length",
+            truncation=True,
+            return_tensors="np"
+        )
+
+        ort_session.run(None, {
+            "input_ids": dummy["input_ids"],
+            "attention_mask": dummy["attention_mask"]
+        })
+
+        print("✅ ONNX Runtime ready")
+
     except Exception as e:
-        raise RuntimeError(f"Model failed to load: {e}")
-        print("   Did you run 'model.py' to train it first?")
+        raise RuntimeError(f"Failed to load ONNX model: {e}")
 
 # ==========================================
-# 3. REQUEST BODY FORMAT
+# REQUEST SCHEMA
 # ==========================================
 class SafetyRequest(BaseModel):
     text: str
 
 # ==========================================
-# 4. API ENDPOINT
+# ENDPOINT
 # ==========================================
 @app.post("/analyze")
 async def analyze_text(request: SafetyRequest):
-    """
-    Input: {"text": "This place is unsafe"}
-    Output: {"is_safe": false, "reason": "AI_DETECTION", "score": 0.99}
-    """
-    global model, tokenizer, device
-    
-    if not model:
+
+    if ort_session is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
 
-    text_input = request.text
-    text_lower = text_input.lower()
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text")
 
-    # --- STEP 1: THE BOUNCER (Rule Check) ---
+    text_lower = text.lower()
+
+    # Rule-based filter
     tokens = re.findall(r"\b\w+\b", text_lower)
     for word in HARD_CUSS_WORDS:
         if any(word in token for token in tokens):
@@ -105,39 +109,30 @@ async def analyze_text(request: SafetyRequest):
                 "flagged_word": word
             }
 
-    # --- STEP 2: THE JUDGE (AI Check) ---
     # Tokenize
-    encoding = tokenizer.encode_plus(
-        text_input,
-        add_special_tokens=True,
+    encoding = tokenizer(
+        text,
         max_length=MAX_LEN,
-        return_token_type_ids=False,
-        padding='max_length',
+        padding="max_length",
         truncation=True,
-        return_attention_mask=True,
-        return_tensors='pt',
+        return_tensors="np"
     )
 
-    input_ids = encoding['input_ids'].to(device)
-    attention_mask = encoding['attention_mask'].to(device)
+    inputs = {
+        "input_ids": encoding["input_ids"],
+        "attention_mask": encoding["attention_mask"]
+    }
 
-    # Predict
-    with torch.inference_mode():
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        # Get probabilities (Safe vs Unsafe)
-        probs = torch.nn.functional.softmax(outputs.logits, dim=1)
-        # Assuming Index 1 is Unsafe, Index 0 is Safe
-        unsafe_score = probs[0][1].item()
-        prediction_index = torch.argmax(probs, dim=1).item()
+    logits = ort_session.run(None, inputs)[0]
 
-    # --- STEP 3: BOOLEAN MAPPING ---
-    # Label 1 = Unsafe => is_safe = False
-    # Label 0 = Safe   => is_safe = True
-    
-    if prediction_index == 1:
+    # Softmax
+    exp = np.exp(logits - np.max(logits, axis=1, keepdims=True))
+    probs = exp / np.sum(exp, axis=1, keepdims=True)
+
+    unsafe_score = float(probs[0][1])
+    pred = int(np.argmax(probs, axis=1)[0])
+
+    if pred == 1:
         return {
             "is_safe": False,
             "reason": "AI_CONTEXT_DETECTION",
@@ -147,7 +142,5 @@ async def analyze_text(request: SafetyRequest):
         return {
             "is_safe": True,
             "reason": "SAFE",
-            "confidence_score": round(1 - unsafe_score, 4) # Confidence in being safe
+            "confidence_score": round(1 - unsafe_score, 4)
         }
-
-# Run with: uvicorn server:app --reload

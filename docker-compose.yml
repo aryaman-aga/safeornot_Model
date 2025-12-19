@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - .:/app  # Hot reload your code changes
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+
+volumes:
+  hf_cache:

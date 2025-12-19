@@ -4,6 +4,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import logging
 import transformers
+import re
+
 
 # ==========================================
 # 1. SERVER CONFIG & GLOBAL VARIABLES
@@ -14,6 +16,8 @@ app = FastAPI(title="Safety Check API", version="1.0")
 transformers.logging.set_verbosity_error()
 
 # Global variables to hold model in memory
+MODEL_ID = "aryaman1222/safeornot-safety-model"
+
 model = None
 tokenizer = None
 device = None
@@ -40,23 +44,32 @@ async def load_model():
     print("🚀 Server starting... Loading Model...")
     
     # 1. Detect Device
-    if torch.backends.mps.is_available():
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         device = torch.device("mps")
-        print("✅ Apple M2 GPU Detected (MPS)")
+        print("✅ Apple Silicon GPU (MPS)")
     else:
         device = torch.device("cpu")
         print("⚠️ Using CPU")
 
     # 2. Load Model & Tokenizer
-    model_path = "./safety_model_v1" # Ensure this folder exists!
+    # model_path = "./safety_model_v1" # Ensure this folder exists!
     try:
-        model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        tokenizer = AutoTokenizer.from_pretrained(model_path, clean_up_tokenization_spaces=True)
+        # model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        # tokenizer = AutoTokenizer.from_pretrained(model_path, clean_up_tokenization_spaces=True)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32  # safe default for CPU/MPS
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_ID,
+            clean_up_tokenization_spaces=True
+        )
+
         model.to(device)
         model.eval()
         print("✅ Model Loaded Successfully!")
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: Could not load model. {e}")
+        raise RuntimeError(f"Model failed to load: {e}")
         print("   Did you run 'model.py' to train it first?")
 
 # ==========================================
@@ -83,8 +96,9 @@ async def analyze_text(request: SafetyRequest):
     text_lower = text_input.lower()
 
     # --- STEP 1: THE BOUNCER (Rule Check) ---
+    tokens = re.findall(r"\b\w+\b", text_lower)
     for word in HARD_CUSS_WORDS:
-        if word in text_lower.split():
+        if any(word in token for token in tokens):
             return {
                 "is_safe": False,
                 "reason": "PROFANITY_FILTER",
@@ -108,8 +122,11 @@ async def analyze_text(request: SafetyRequest):
     attention_mask = encoding['attention_mask'].to(device)
 
     # Predict
-    with torch.no_grad():
-        outputs = model(input_ids, attention_mask)
+    with torch.inference_mode():
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
         # Get probabilities (Safe vs Unsafe)
         probs = torch.nn.functional.softmax(outputs.logits, dim=1)
         # Assuming Index 1 is Unsafe, Index 0 is Safe

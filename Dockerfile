@@ -1,35 +1,36 @@
-# Use a lightweight Python base image
-FROM python:3.10-slim
+# Stage 1: Download model
+FROM python:3.10-slim AS builder
 
-# Set working directory
 WORKDIR /app
-
-# Set HF cache location BEFORE downloading
 ENV HF_HOME=/app/.cache/huggingface
 
-# Copy requirements first to leverage Docker layer caching
 COPY requirements.txt .
 
-# Install dependencies
-# --no-cache-dir reduces image size
-# Note: If you don't need GPU support, ensure requirements.txt specifies 
-# the CPU version of torch, or the image will be significantly larger.
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir \
+RUN pip install --no-cache-dir \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements.txt
 
-# Download model (now saved to /app/.cache/huggingface)
+# Download model in builder stage
 RUN python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
     AutoModelForSequenceClassification.from_pretrained('aryaman1222/safeornot-safety-model'); \
     AutoTokenizer.from_pretrained('aryaman1222/safeornot-safety-model')"
 
-# Copy the rest of the application code
-COPY . .
+# Stage 2: Final slim image
+FROM python:3.10-slim
 
-# Expose the port
+WORKDIR /app
+ENV HF_HOME=/app/.cache/huggingface
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy cached model from builder
+COPY --from=builder /app/.cache /app/.cache
+
+# Copy application code
+COPY server.py .
+
 EXPOSE 8000
 
-# Run the application
-# Host 0.0.0.0 is crucial for accessing the container from outside
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -5,3 +5,10 @@ transformers
 huggingface_hub
 pydantic
 --extra-index-url https://download.pytorch.org/whl/cpu
+fastapi
+uvicorn
+transformers
+onnxruntime
+numpy
+huggingface_hub
+

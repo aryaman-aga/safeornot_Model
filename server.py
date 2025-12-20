@@ -27,8 +27,84 @@ HARD_CUSS_WORDS = [
     "lodu", "laude", "lawde", "loda",
     "randi", "chinnal", "kameena", "harami", "haramkhor",
     "tatte", "jhant", "gaand", "gand", "lund",
-    "chudai", "chodu", "randikhana", "rand", "madar"
+    "chudai", "chodu", "randikhana", "rand", "madar", "fuck"
 ]
+
+# Harmful actions (normalized roots)
+HARM_ACTIONS = [
+    "harass", "harassing", "harassment",
+    "abuse", "abusing",
+    "assault", "assaulting",
+    "molest", "molesting",
+    "rape", "raping",
+    "stalk", "stalking"
+]
+
+# Endorsement / encouragement phrases
+ENDORSEMENT_PATTERNS = [
+    "is a good thing",
+    "is good",
+    "is nice",
+    "is okay",
+    "is fine",
+    "nothing wrong with",
+    "should be allowed",
+    "should happen",
+    "deserve to be",
+    "they deserve",
+    "it is right to",
+    "it is correct to"
+]
+
+def split_sentences(text: str):
+    return re.split(r'(?<=[.!?])\s+', text)
+
+NEGATIONS = [
+    "not", "never", "no", "isn't", "is not", "should not", "wrong", "bad"
+]
+
+ENDORSEMENT_VERBS = [
+    "good", "nice", "okay", "fine", "acceptable", "right", "correct"
+]
+
+def contains_endorsement(sentence: str) -> bool:
+    s = sentence.lower()
+
+    for action in HARM_ACTIONS:
+        if action in s:
+            # If negation exists → user is condemning harm
+            for neg in NEGATIONS:
+                if neg in s:
+                    return False
+
+            # Positive endorsement
+            for word in ENDORSEMENT_VERBS:
+                if word in s:
+                    return True
+
+    return False
+
+
+SEXUAL_TERMS = [
+    "sex", "hard sex", "blowjob", "anal", "fuck",
+    "nude", "naked", "porn", "orgasm", "dick",
+    "pussy", "boobs", "cock"
+]
+
+SEXUAL_CONTEXT_VERBS = [
+    "want", "do", "have", "like", "enjoy", "crave"
+]
+
+def contains_sexual_explicit_content(text: str) -> bool:
+    s = text.lower()
+    for term in SEXUAL_TERMS:
+        if term in s:
+            for verb in SEXUAL_CONTEXT_VERBS:
+                if verb in s:
+                    return True
+    return False
+
+
 
 # ==========================================
 # STARTUP
@@ -109,17 +185,56 @@ async def analyze_text(request: SafetyRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
+    # text_lower = text.lower()
+
+    # # Rule-based filter
+    # tokens = re.findall(r"\b\w+\b", text_lower)
+    # for word in HARD_CUSS_WORDS:
+    #     if any(word in token for token in tokens):
+    #         return {
+    #             "is_safe": False,
+    #             "reason": "PROFANITY_FILTER",
+    #             "flagged_word": word
+    #         }
+
+    if contains_sexual_explicit_content(text):
+        return {
+        "is_safe": False,
+        "reason": "SEXUAL_EXPLICIT_CONTENT"
+        }
+
+
     text_lower = text.lower()
 
-    # Rule-based filter
+# ======================================================
+# 🚨 STEP 0: HARM ENDORSEMENT DETECTION (NEW)
+# ======================================================
+    sentences = split_sentences(text)
+
+    for sent in sentences:
+        if contains_endorsement(sent):
+           return {
+            "is_safe": False,
+            "reason": "HARM_ENDORSEMENT_DETECTED",
+            "flagged_sentence": sent
+          }
+
+# ======================================================
+# STEP 1: PROFANITY FILTER (existing)
+# ======================================================
     tokens = re.findall(r"\b\w+\b", text_lower)
     for word in HARD_CUSS_WORDS:
         if any(word in token for token in tokens):
-            return {
-                "is_safe": False,
-                "reason": "PROFANITY_FILTER",
-                "flagged_word": word
-            }
+           return {
+            "is_safe": False,
+            "reason": "PROFANITY_FILTER",
+            "flagged_word": word
+          }
+
+# ======================================================
+# STEP 2: ONNX MODEL (existing)
+# ======================================================
+
 
     # Tokenize
     encoding = tokenizer(

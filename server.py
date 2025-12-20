@@ -37,21 +37,24 @@ HARD_CUSS_WORDS = [
 async def load_model():
     global tokenizer, ort_session
 
-    print("🚀 Loading ONNX model from Hugging Face...")
+    print("🚀 Loading ONNX model...")
 
     try:
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_REPO,
-            use_fast=True
-        )
-
-        # Download ONNX model
-        onnx_path = hf_hub_download(
-            repo_id=MODEL_REPO,
-            filename="model.onnx",
-            token=os.getenv("HF_TOKEN")
-        )
+        # Check if we have a local model path (from Docker)
+        local_model_path = os.getenv("MODEL_PATH")
+        
+        if local_model_path and os.path.exists(local_model_path):
+            print(f"📂 Loading from local path: {local_model_path}")
+            tokenizer = AutoTokenizer.from_pretrained(local_model_path, use_fast=True)
+            onnx_path = os.path.join(local_model_path, "model.onnx")
+        else:
+            print(f"☁️  Downloading from Hugging Face: {MODEL_REPO}")
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_REPO, use_fast=True)
+            onnx_path = hf_hub_download(
+                repo_id=MODEL_REPO,
+                filename="model.onnx",
+                token=os.getenv("HF_TOKEN")
+            )
 
         # Create ONNX Runtime session
         ort_session = ort.InferenceSession(
@@ -68,10 +71,15 @@ async def load_model():
             return_tensors="np"
         )
 
-        ort_session.run(None, {
+        # Fix: Include token_type_ids if the tokenizer produces them
+        inputs = {
             "input_ids": dummy["input_ids"],
             "attention_mask": dummy["attention_mask"]
-        })
+        }
+        if "token_type_ids" in dummy:
+            inputs["token_type_ids"] = dummy["token_type_ids"]
+
+        ort_session.run(None, inputs)
 
         print("✅ ONNX Runtime ready")
 
@@ -87,6 +95,10 @@ class SafetyRequest(BaseModel):
 # ==========================================
 # ENDPOINT
 # ==========================================
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "model_loaded": ort_session is not None}
+
 @app.post("/analyze")
 async def analyze_text(request: SafetyRequest):
 
@@ -122,6 +134,10 @@ async def analyze_text(request: SafetyRequest):
         "input_ids": encoding["input_ids"],
         "attention_mask": encoding["attention_mask"]
     }
+    
+    # Fix: Include token_type_ids for inference as well
+    if "token_type_ids" in encoding:
+        inputs["token_type_ids"] = encoding["token_type_ids"]
 
     logits = ort_session.run(None, inputs)[0]
 
